@@ -1,6 +1,7 @@
 package pgqueue
 
 import (
+	"bytes"
 	"context"
 	"embed"
 	"fmt"
@@ -149,25 +150,22 @@ func (q *Queue) Enqueue(ctx context.Context, jobs []JobForEnqueue) ([]int64, err
 		dictionary = []byte{}
 	}
 
-	compress := func(data []byte) []byte {
-		return gozstd.CompressLevel([]byte{}, data, 11)
-	}
-	if len(dictionary) != 0 {
-		cdict, err := gozstd.NewCDictLevel(dictionary, 11)
+	var cdict *gozstd.CDict
+	if len(dictionary) > 0 {
+		cd, err := gozstd.NewCDictLevel(dictionary, 11)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("Failed to create a zstd cdict: %w", err)
 		}
-		defer cdict.Release()
-
-		compress = func(data []byte) []byte {
-			return gozstd.CompressDict([]byte{}, data, cdict)
-		}
+		cdict = cd
 	}
 
 	now := time.Now()
 	var valRows [][]any
-	for _, job := range jobs {
-		compressedArgs := compress(job.Args)
+	for i, job := range jobs {
+		compressedArgs, err := compressZstd(job.Args, cdict)
+		if err != nil {
+			return nil, fmt.Errorf("Failed to compress args of job %d: %w", i, err)
+		}
 		valRows = append(valRows, []any{job.Queue, 0, now, job.RunAt, job.ExpiresAt, nil, compressedArgs, 0, "", false})
 	}
 
@@ -207,6 +205,28 @@ func (q *Queue) Enqueue(ctx context.Context, jobs []JobForEnqueue) ([]int64, err
 	}
 
 	return ids, nil
+}
+
+func compressZstd(data []byte, cdict *gozstd.CDict) ([]byte, error) {
+	out := bytes.NewBuffer([]byte{})
+	writer := gozstd.NewWriterParams(out, &gozstd.WriterParams{
+		Dict:             cdict,
+		CompressionLevel: 11,
+		WindowLog:        27,
+	})
+
+	defer writer.Release()
+
+	_, err := writer.Write(data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to write data to gozstd writer: %w", err)
+	}
+
+	if err := writer.Close(); err != nil {
+		return nil, fmt.Errorf("failed to close gozstd writer: %w", err)
+	}
+
+	return out.Bytes(), nil
 }
 
 type JobResult struct {
@@ -284,9 +304,9 @@ func Work(ctx context.Context, job *Job, fn func(*Job) error) (jobResult JobResu
 		if r := recover(); r != nil {
 			var err error
 			if rErr, ok := r.(error); ok {
-				err = fmt.Errorf("Recovered from panic in (*Queue).Work: %w", rErr)
+				err = fmt.Errorf("Recovered from panic in pgqueue.Work: %w", rErr)
 			} else {
-				err = fmt.Errorf("Recovered from panic in (*Queue).Work: %v", r)
+				err = fmt.Errorf("Recovered from panic in pgqueue.Work: %v", r)
 			}
 			jobResult = JobResult{Id: job.Id, Error: err}
 		}
@@ -355,7 +375,7 @@ func (q *Queue) Get(ctx context.Context, queue string, limit int) ([]Job, error)
 		if err != nil {
 			return nil, err
 		}
-		defer ddict.Release()
+
 		decompress := func(data []byte) ([]byte, error) {
 			return gozstd.DecompressDict([]byte{}, data, ddict)
 		}
