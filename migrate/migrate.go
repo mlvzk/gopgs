@@ -35,13 +35,16 @@ func Migrate(ctx context.Context, conn *pgx.Conn, schemaName string, migrations 
 		rows[i] = []interface{}{m.Id, m.Statements}
 	}
 
-	args, valuesSql := helper.GenerateValues(rows, []string{"integer", "text"})
+	args, valsSelect := helper.GenerateSelect(migrations, func(migration *Migration, cs *helper.ColumnSetter) {
+		cs.Set("id", "int", migration.Id)
+		cs.Set("statements", "text", migration.Statements)
+	})
 
 	_, err = conn.Exec(ctx, `
 	with vals as (
-		values `+valuesSql+`
+		`+valsSelect+`
 	)
-	select pg_temp.migrate((select array_agg((vals.*)::pgqueue.done_migrations) from vals))
+	select pg_temp.migrate((select array_agg((id, statements)::pgqueue.done_migrations) from vals))
 	`, args...)
 	if err != nil {
 		return err

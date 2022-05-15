@@ -142,10 +142,12 @@ type JobForEnqueue struct {
 
 func (q *Queue) Enqueue(ctx context.Context, jobs []JobForEnqueue) ([]int64, error) {
 	allJobArgs := make([][]byte, len(jobs))
+	allJobArgsLen := 0
 	for i, job := range jobs {
 		allJobArgs[i] = job.Args
+		allJobArgsLen += len(job.Args)
 	}
-	dictionary := gozstd.BuildDict(allJobArgs, 1024*1024)
+	dictionary := gozstd.BuildDict(allJobArgs, allJobArgsLen/len(allJobArgs)*2)
 	if dictionary == nil {
 		dictionary = []byte{}
 	}
@@ -160,32 +162,47 @@ func (q *Queue) Enqueue(ctx context.Context, jobs []JobForEnqueue) ([]int64, err
 	}
 
 	now := time.Now()
-	var valRows [][]any
+	type jobWithCompressedArgs struct {
+		JobForEnqueue
+		compressedArgs []byte
+	}
+	jobsWithCompressedArgs := make([]jobWithCompressedArgs, 0, len(jobs))
 	for i, job := range jobs {
 		compressedArgs, err := compressZstd(job.Args, cdict)
 		if err != nil {
 			return nil, fmt.Errorf("Failed to compress args of job %d: %w", i, err)
 		}
-		valRows = append(valRows, []any{job.Queue, 0, now, job.RunAt, job.ExpiresAt, nil, compressedArgs, 0, "", false})
+		jobsWithCompressedArgs = append(jobsWithCompressedArgs, jobWithCompressedArgs{
+			JobForEnqueue:  job,
+			compressedArgs: compressedArgs,
+		})
 	}
 
-	args, valuesSql := helper.GenerateValues(valRows, []string{"text", "integer", "timestamptz", "timestamptz", "timestamptz", "timestamptz", "bytea", "integer", "text", "boolean"})
+	args, valsSelect := helper.GenerateSelect(jobsWithCompressedArgs, func(t *jobWithCompressedArgs, cols *helper.ColumnSetter) {
+		cols.Set("queue", "text", t.Queue)
+		cols.Set("priority", "smallint", t.Priority)
+		cols.Set("enqueued_at", "timestamptz", now)
+		cols.Set("run_at", "timestamptz", t.RunAt)
+		cols.Set("expires_at", "timestamptz", t.ExpiresAt)
+		cols.Set("args", "bytea", t.compressedArgs)
+	})
 	args = append(args, dictionary)
+	dictArg := strconv.Itoa(len(args))
 
 	rows, err := q.db.Query(ctx, `
 		with vals as (
-			values `+valuesSql+`
+			`+valsSelect+`
 		), dict_to_insert as (
-			select * from (values (0, $`+strconv.Itoa(len(args))+`::bytea)) as t(ref_count, data) where length(data) > 0
+			select * from (values (0, $`+dictArg+`::bytea)) as t(ref_count, data) where length(data) > 0
 		), dict_id as (
 			insert into pgqueue.dictionaries (ref_count, data) select * from dict_to_insert returning id
 		), inserted_jobs as (
 			insert into pgqueue.jobs (
 				queue, priority, enqueued_at, run_at, expires_at, failed_at, args, error_count, last_error, retryable, dict_id
-			) select *, (select id from dict_id) as dict_id from vals returning id
+			) select queue, priority, enqueued_at, run_at, expires_at, null, args, 0, '', false, (select id from dict_id) as dict_id from vals returning id
 		) select id from inserted_jobs`, args...)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("Failed to insert jobs: %w", err)
 	}
 
 	defer rows.Close()
@@ -194,14 +211,14 @@ func (q *Queue) Enqueue(ctx context.Context, jobs []JobForEnqueue) ([]int64, err
 	for rows.Next() {
 		var id int64
 		if err := rows.Scan(&id); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("Failed to scan id: %w", err)
 		}
 
 		ids = append(ids, id)
 	}
 
 	if rows.Err() != nil {
-		panic(rows.Err())
+		return nil, fmt.Errorf("rows.Err(): %w", err)
 	}
 
 	return ids, nil
@@ -240,20 +257,19 @@ func (q *Queue) Finish(ctx context.Context, jobResults []JobResult) error {
 		return nil
 	}
 
-	var rows [][]any
-	for _, job := range jobResults {
-		var errText string
-		if job.Error != nil {
-			errText = job.Error.Error()
+	args, resultsSelect := helper.GenerateSelect(jobResults, func(t *JobResult, cols *helper.ColumnSetter) {
+		cols.Set("id", "bigint", t.Id)
+		errText := ""
+		if t.Error != nil {
+			errText = t.Error.Error()
 		}
-		rows = append(rows, []any{job.Id, errText, job.Retryable})
-	}
-
-	args, valuesSql := helper.GenerateValues(rows, []string{"bigint", "text", "boolean"})
+		cols.Set("error", "text", errText)
+		cols.Set("retryable", "boolean", t.Retryable)
+	})
 
 	_, err := q.db.Exec(ctx, `
-		with results(id, error, retryable) as (
-			values `+valuesSql+`
+		with results as (
+			`+resultsSelect+`
 		), results_for_deletion as (
 			select id from results where error = ''
 		), results_for_update as (

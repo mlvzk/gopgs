@@ -5,24 +5,47 @@ import (
 	"strings"
 )
 
-func GenerateValues(rows [][]any, types []string) ([]any, string) {
-	var valuesSql strings.Builder
+type ColumnSetter struct {
+	values map[string]any
+	types  map[string]string
+}
+
+func newColumnSetter() *ColumnSetter {
+	return &ColumnSetter{values: map[string]any{}, types: map[string]string{}}
+}
+
+func (c *ColumnSetter) Set(col string, sqlType string, val any) {
+	c.values[col] = val
+	c.types[col] = sqlType
+}
+
+func GenerateSelect[T any](ts []T, tToRow func(*T, *ColumnSetter)) ([]any, string) {
+	var withSql strings.Builder
 	var args []any
 
-	for i, row := range rows {
-		if i != 0 {
-			valuesSql.WriteString(", ")
+	arrs := make(map[string][]any)
+	var types map[string]string
+	for _, t := range ts {
+		cols := newColumnSetter()
+		tToRow(&t, cols)
+		types = cols.types
+		for k := range cols.values {
+			arrs[k] = append(arrs[k], cols.values[k])
 		}
-		valuesSql.WriteString("(")
-		for i := 0; i < len(row); i++ {
-			if i != 0 {
-				valuesSql.WriteString(", ")
-			}
-			valuesSql.WriteString("$" + strconv.Itoa(len(args)+1+i) + "::" + types[i])
-		}
-		args = append(args, row...)
-		valuesSql.WriteString(")")
 	}
 
-	return args, valuesSql.String()
+	withSql.WriteString("SELECT ")
+	first := true
+	for k := range arrs {
+		if first {
+			first = false
+		} else {
+			withSql.WriteString(", ")
+		}
+
+		args = append(args, arrs[k])
+		withSql.WriteString("unnest($" + strconv.Itoa(len(args)) + "::" + types[k] + "[]) as " + k)
+	}
+
+	return args, withSql.String()
 }
