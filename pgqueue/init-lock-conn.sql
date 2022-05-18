@@ -2,12 +2,13 @@ CREATE TEMPORARY TABLE acquired_jobs (job_id bigint not null, queue text not nul
 
 CREATE FUNCTION pg_temp.acquire_jobs(text, int) RETURNS SETOF pgqueue.jobs AS $$
 DECLARE
-    job pgqueue.jobs%rowtype;
+    jid bigint;
+    acquired_job_ids bigint[];
     counter int;
 BEGIN
     counter = 0;
-    FOR job IN
-        SELECT j.*
+    FOR jid IN
+        SELECT j.id
         FROM pgqueue.jobs AS j
         WHERE queue = $1
         AND NOT(id = ANY(SELECT job_id FROM acquired_jobs WHERE queue = $1))
@@ -16,17 +17,18 @@ BEGIN
         AND (failed_at IS NULL OR retryable = true)
         ORDER BY priority DESC, run_at NULLS LAST, expires_at NULLS LAST, id
     LOOP
-        IF pg_try_advisory_lock(job.id) THEN
+        IF pg_try_advisory_lock(jid) THEN
             counter = counter + 1;
-            INSERT INTO acquired_jobs VALUES (job.id, job.queue);
-            RETURN NEXT job;
+            acquired_job_ids = acquired_job_ids || jid;
         END IF;
         IF counter >= $2 THEN
-            RETURN;
+            INSERT INTO acquired_jobs SELECT unnest(acquired_job_ids), $1;
+            RETURN QUERY SELECT * FROM pgqueue.jobs WHERE id = ANY(acquired_job_ids);
+            EXIT;
         END IF;
     END LOOP;
 END
-$$ LANGUAGE plpgsql;	
+$$ LANGUAGE plpgsql;
 
 CREATE FUNCTION pg_temp.unlock_jobs(bigint[]) RETURNS void AS $$
 DECLARE

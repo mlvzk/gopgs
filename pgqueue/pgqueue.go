@@ -106,7 +106,7 @@ func (q *Queue) runMigrations(ctx context.Context) error {
 			panic("migration files can't be directories")
 		}
 
-		id, err := strconv.Atoi(strings.Split(entry.Name(), "-")[0])
+		version, err := strconv.Atoi(strings.Split(entry.Name(), "-")[0])
 		if err != nil {
 			panic("migration files must be named like '<id>-<name>.sql'")
 		}
@@ -117,7 +117,7 @@ func (q *Queue) runMigrations(ctx context.Context) error {
 		}
 
 		migrations = append(migrations, migrate.Migration{
-			Id:         id,
+			Version:    version,
 			Statements: string(content),
 		})
 	}
