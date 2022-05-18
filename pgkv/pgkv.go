@@ -212,21 +212,6 @@ start:
 	return res.value, nil
 }
 
-func (s *Store) Set(ctx context.Context, key string, value []byte) error {
-	conn, err := s.db.Acquire(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to acquire connection: %w", err)
-	}
-
-	defer conn.Release()
-
-	if _, err := conn.Exec(ctx, `INSERT INTO pgkv.store (key, value, compressed) VALUES ($1, $2, $3) ON CONFLICT (key) DO UPDATE SET value = $2, compressed = $3`, key, value, false); err != nil {
-		return fmt.Errorf("failed to insert value: %w", err)
-	}
-
-	return nil
-}
-
 func (s *Store) Get(ctx context.Context, key string) ([]byte, error) {
 	conn, err := s.db.Acquire(ctx)
 	if err != nil {
