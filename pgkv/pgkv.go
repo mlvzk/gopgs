@@ -181,10 +181,10 @@ start:
 	}
 
 	if locked {
-		var ownsLock bool
+		var ownsLockConn bool
 		defer func() {
 			if retErr != nil {
-				if !ownsLock {
+				if !ownsLockConn {
 					s.lockConnLock.Lock()
 					defer s.lockConnLock.Unlock()
 				}
@@ -199,10 +199,10 @@ start:
 		}
 
 		s.lockConnLock.Lock()
-		ownsLock = true
+		ownsLockConn = true
 		defer func() {
 			s.lockConnLock.Unlock()
-			ownsLock = false
+			ownsLockConn = false
 		}()
 
 		compressed := false
@@ -231,10 +231,10 @@ start:
 	return res.value, nil
 }
 
-func (s *Store) Get(ctx context.Context, key string) ([]byte, error) {
+func (s *Store) Get(ctx context.Context, key string) (_ []byte, found bool, _ error) {
 	conn, err := s.db.Acquire(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to acquire connection: %w", err)
+		return nil, false, fmt.Errorf("failed to acquire connection: %w", err)
 	}
 
 	defer conn.Release()
@@ -246,10 +246,10 @@ func (s *Store) Get(ctx context.Context, key string) ([]byte, error) {
 		if compressed {
 			panic("compression is not implemented")
 		}
-		return value, nil
+		return value, true, nil
 	} else if errors.Is(err, pgx.ErrNoRows) {
-		return nil, nil
+		return nil, false, nil
 	} else {
-		return nil, fmt.Errorf("failed to scan value: %w", err)
+		return nil, false, fmt.Errorf("failed to scan value: %w", err)
 	}
 }
