@@ -35,11 +35,6 @@ func Migrate(ctx context.Context, conn *pgx.Conn, schemaName string, migrations 
 		return fmt.Errorf("failed to run migrate.sql: %w", err)
 	}
 
-	rows := make([][]interface{}, len(migrations))
-	for i, m := range migrations {
-		rows[i] = []interface{}{m.Version, m.Statements}
-	}
-
 	args, valsSelect := helper.GenerateSelect(migrations, func(migration *Migration, cs *helper.ColumnSetter) {
 		cs.Set("version", "int", migration.Version)
 		cs.Set("statements", "text", migration.Statements)
