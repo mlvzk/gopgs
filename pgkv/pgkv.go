@@ -169,7 +169,7 @@ func (s *Store) getOrLock(ctx context.Context, key string, oldest time.Time) (re
 //
 // If you don't care about updating old values,
 // pass time.Time{}
-func (s *Store) GetOrSet(ctx context.Context, key string, refreshOlderThan time.Time, fn func() ([]byte, error)) ([]byte, error) {
+func (s *Store) GetOrSet(ctx context.Context, key string, refreshOlderThan time.Time, fn func() ([]byte, error)) (retVal []byte, retErr error) {
 	s.keyLock.Lock(key)
 	defer s.keyLock.Unlock(key)
 
@@ -181,18 +181,32 @@ start:
 	}
 
 	if locked {
+		var ownsLock bool
+		defer func() {
+			if retErr != nil {
+				if !ownsLock {
+					s.lockConnLock.Lock()
+					defer s.lockConnLock.Unlock()
+				}
+
+				s.lockConn.Exec(ctx, `SELECT pg_temp.unlock_get_or_lock($1)`, key)
+			}
+		}()
+
 		val, err := fn()
 		if err != nil {
 			return nil, fmt.Errorf("failed to call fn: %w", err)
 		}
 
 		s.lockConnLock.Lock()
-		defer s.lockConnLock.Unlock()
+		ownsLock = true
+		defer func() {
+			s.lockConnLock.Unlock()
+			ownsLock = false
+		}()
 
 		compressed := false
 		if _, err := s.lockConn.Exec(ctx, `SELECT pg_temp.set_and_unlock($1, $2, $3)`, key, val, compressed); err != nil {
-			defer s.lockConn.Exec(ctx, `SELECT pg_temp.unlock_get_or_lock($1)`, key)
-
 			return nil, fmt.Errorf("failed to set and unlock: %w", err)
 		}
 
