@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/BurntSushi/locker"
 	"github.com/jackc/pgx/v4"
 	"github.com/jackc/pgx/v4/pgxpool"
 	"github.com/mlvzk/gopgs/migrate"
@@ -19,6 +20,7 @@ type Store struct {
 	lockConnLock   sync.Mutex
 	channels       sync.Map
 	cancelListener context.CancelFunc
+	keyLock        *locker.Locker
 }
 
 //go:embed init-conn.sql
@@ -62,7 +64,7 @@ func New(ctx context.Context, connStr string) (*Store, error) {
 	}
 
 	cancelCtx, cancelListener := context.WithCancel(context.Background())
-	store := &Store{db: db, lockConn: lockConn, cancelListener: cancelListener}
+	store := &Store{db: db, lockConn: lockConn, cancelListener: cancelListener, keyLock: locker.NewLocker()}
 
 	err = store.listenToStoreUpdate(ctx, listenConn)
 	if err != nil {
@@ -141,18 +143,18 @@ func (s *Store) getOrLock(ctx context.Context, key string, oldest time.Time) (re
 	var value *[]byte
 	var compressed *bool
 	row := s.lockConn.QueryRow(ctx, `SELECT found, locked, (c.kv::pgkv.store).value, (c.kv::pgkv.store).compressed FROM pg_temp.get_or_lock($1, $2) c`, key, oldest)
-	if err := row.Scan(&found, &locked, &value, &compressed); err == nil {
-		if found {
-			return &getOrLockFound{
-				value:      *value,
-				compressed: *compressed,
-			}, locked, nil
-		} else {
-			return nil, locked, nil
-		}
-	} else {
+	if err := row.Scan(&found, &locked, &value, &compressed); err != nil {
 		return nil, false, fmt.Errorf("failed to scan value: %w", err)
 	}
+
+	if !found {
+		return nil, locked, nil
+	}
+
+	return &getOrLockFound{
+		value:      *value,
+		compressed: *compressed,
+	}, locked, nil
 }
 
 // GetOrSet returns the value associated with the key.
@@ -168,6 +170,9 @@ func (s *Store) getOrLock(ctx context.Context, key string, oldest time.Time) (re
 // If you don't care about updating old values,
 // pass time.Time{}
 func (s *Store) GetOrSet(ctx context.Context, key string, refreshOlderThan time.Time, fn func() ([]byte, error)) ([]byte, error) {
+	s.keyLock.Lock(key)
+	defer s.keyLock.Unlock(key)
+
 start:
 	storeUpdateCh := s.listenForStoreUpdate(key)
 	res, locked, err := s.getOrLock(ctx, key, refreshOlderThan)

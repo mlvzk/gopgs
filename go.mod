@@ -8,6 +8,7 @@ require (
 )
 
 require (
+	github.com/BurntSushi/locker v0.0.0-20171006230638-a6e239ea1c69
 	github.com/jackc/chunkreader/v2 v2.0.1 // indirect
 	github.com/jackc/pgconn v1.12.1 // indirect
 	github.com/jackc/pgio v1.0.0 // indirect
