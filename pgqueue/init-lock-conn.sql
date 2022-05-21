@@ -22,11 +22,12 @@ BEGIN
             acquired_job_ids = acquired_job_ids || jid;
         END IF;
         IF counter >= $2 THEN
-            INSERT INTO acquired_jobs SELECT unnest(acquired_job_ids), $1;
-            RETURN QUERY SELECT * FROM pgqueue.jobs WHERE id = ANY(acquired_job_ids);
             EXIT;
         END IF;
     END LOOP;
+
+    INSERT INTO acquired_jobs SELECT unnest(acquired_job_ids), $1;
+    RETURN QUERY SELECT * FROM pgqueue.jobs WHERE id = ANY(acquired_job_ids);
 END
 $$ LANGUAGE plpgsql;
 
