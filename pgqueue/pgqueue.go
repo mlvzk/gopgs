@@ -147,7 +147,10 @@ func (q *Queue) Enqueue(ctx context.Context, jobs []JobForEnqueue) ([]int64, err
 		allJobArgs[i] = job.Args
 		allJobArgsLen += len(job.Args)
 	}
-	dictionary := gozstd.BuildDict(allJobArgs, allJobArgsLen/len(allJobArgs)*2)
+	var dictionary []byte
+	if len(jobs) > 1 {
+		dictionary = gozstd.BuildDict(allJobArgs, allJobArgsLen/len(allJobArgs)*2)
+	}
 	if dictionary == nil {
 		dictionary = []byte{}
 	}
