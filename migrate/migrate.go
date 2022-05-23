@@ -36,8 +36,8 @@ func Migrate(ctx context.Context, conn *pgx.Conn, schemaName string, migrations 
 	}
 
 	args, valsSelect := helper.GenerateSelect(migrations, func(migration *Migration, cs *helper.ColumnSetter) {
-		cs.Set("version", "int", migration.Version)
-		cs.Set("statements", "text", migration.Statements)
+		cs.Set("version", "int", func() any { return migration.Version })
+		cs.Set("statements", "text", func() any { return migration.Statements })
 	})
 
 	_, err = conn.Exec(ctx, `

@@ -26,11 +26,23 @@ func TestGenerateWithStatement(t *testing.T) {
 					},
 				},
 				tToRow: func(t *map[string]any, x *ColumnSetter) {
-					x.Set("Id", "int", (*t)["Id"])
-					x.Set("Name", "text", (*t)["Name"])
+					x.Set("Id", "int", func() any { return (*t)["Id"] })
+					x.Set("Name", "text", func() any { return (*t)["Name"] })
 				},
 			},
 			want:  []any{[]any{1}, []any{"test1"}},
+			want1: "SELECT unnest($1::int[]) as Id, unnest($2::text[]) as Name",
+		},
+		{
+			name: "empty args",
+			args: args[map[string]any]{
+				ts: []map[string]any{},
+				tToRow: func(t *map[string]any, x *ColumnSetter) {
+					x.Set("Id", "int", func() any { return (*t)["Id"] })
+					x.Set("Name", "text", func() any { return (*t)["Name"] })
+				},
+			},
+			want:  []any{[]any{}, []any{}},
 			want1: "SELECT unnest($1::int[]) as Id, unnest($2::text[]) as Name",
 		},
 	}

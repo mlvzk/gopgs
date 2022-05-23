@@ -182,12 +182,12 @@ func (q *Queue) Enqueue(ctx context.Context, jobs []JobForEnqueue) ([]int64, err
 	}
 
 	args, valsSelect := helper.GenerateSelect(jobsWithCompressedArgs, func(t *jobWithCompressedArgs, cols *helper.ColumnSetter) {
-		cols.Set("queue", "text", t.Queue)
-		cols.Set("priority", "smallint", t.Priority)
-		cols.Set("enqueued_at", "timestamptz", now)
-		cols.Set("run_at", "timestamptz", t.RunAt)
-		cols.Set("expires_at", "timestamptz", t.ExpiresAt)
-		cols.Set("args", "bytea", t.compressedArgs)
+		cols.Set("queue", "text", func() any { return t.Queue })
+		cols.Set("priority", "smallint", func() any { return t.Priority })
+		cols.Set("enqueued_at", "timestamptz", func() any { return now })
+		cols.Set("run_at", "timestamptz", func() any { return t.RunAt })
+		cols.Set("expires_at", "timestamptz", func() any { return t.ExpiresAt })
+		cols.Set("args", "bytea", func() any { return t.compressedArgs })
 	})
 	args = append(args, dictionary)
 	dictArg := strconv.Itoa(len(args))
@@ -261,13 +261,15 @@ func (q *Queue) Finish(ctx context.Context, jobResults []JobResult) error {
 	}
 
 	args, resultsSelect := helper.GenerateSelect(jobResults, func(t *JobResult, cols *helper.ColumnSetter) {
-		cols.Set("id", "bigint", t.Id)
-		errText := ""
-		if t.Error != nil {
-			errText = t.Error.Error()
-		}
-		cols.Set("error", "text", errText)
-		cols.Set("retryable", "boolean", t.Retryable)
+		cols.Set("id", "bigint", func() any { return t.Id })
+		cols.Set("error", "text", func() any {
+			if t.Error == nil {
+				return ""
+			}
+
+			return t.Error.Error()
+		})
+		cols.Set("retryable", "boolean", func() any { return t.Retryable })
 	})
 
 	_, err := q.db.Exec(ctx, `

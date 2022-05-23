@@ -6,16 +6,19 @@ import (
 )
 
 type ColumnSetter struct {
-	values map[string]any
-	types  map[string]string
+	values    map[string]any
+	types     map[string]string
+	skipValue bool
 }
 
-func newColumnSetter() *ColumnSetter {
-	return &ColumnSetter{values: map[string]any{}, types: map[string]string{}}
+func newColumnSetter(skipValue bool) *ColumnSetter {
+	return &ColumnSetter{values: map[string]any{}, types: map[string]string{}, skipValue: skipValue}
 }
 
-func (c *ColumnSetter) Set(col string, sqlType string, val any) {
-	c.values[col] = val
+func (c *ColumnSetter) Set(col string, sqlType string, val func() any) {
+	if !c.skipValue {
+		c.values[col] = val()
+	}
 	c.types[col] = sqlType
 }
 
@@ -25,10 +28,16 @@ func GenerateSelect[T any](ts []T, tToRow func(*T, *ColumnSetter)) ([]any, strin
 
 	arrs := make(map[string][]any)
 	var types map[string]string
+	headerColumnSetter := newColumnSetter(true)
+	tToRow(nil, headerColumnSetter)
+	types = headerColumnSetter.types
+	for colName := range types {
+		arrs[colName] = []any{}
+	}
+
 	for _, t := range ts {
-		cols := newColumnSetter()
+		cols := newColumnSetter(false)
 		tToRow(&t, cols)
-		types = cols.types
 		for k := range cols.values {
 			arrs[k] = append(arrs[k], cols.values[k])
 		}
