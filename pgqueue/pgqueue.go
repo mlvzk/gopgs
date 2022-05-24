@@ -434,3 +434,71 @@ func (q *Queue) Get(ctx context.Context, queue string, limit int) ([]Job, error)
 
 	return jobs, nil
 }
+
+type Statistics struct {
+	JobsCount       int
+	LockedJobsCount int
+}
+
+func (q *Queue) Statistics(ctx context.Context) (map[string]*Statistics, error) {
+	rows, err := q.db.Query(ctx, `
+	SELECT queue, count(*)
+	FROM pgqueue.jobs AS j
+	WHERE (run_at IS NULL OR run_at <= now())
+	AND (expires_at IS NULL OR now() < expires_at)
+	AND (failed_at IS NULL OR retryable = true)
+	GROUP BY queue
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("failed to send a query: %w", err)
+	}
+
+	defer rows.Close()
+
+	stats := make(map[string]*Statistics)
+	for rows.Next() {
+		var queue string
+		var count int
+		if err := rows.Scan(&queue, &count); err != nil {
+			return nil, err
+		}
+
+		stats[queue] = &Statistics{JobsCount: count}
+	}
+
+	if rows.Err() != nil {
+		return nil, fmt.Errorf("failed during reading: %w", rows.Err())
+	}
+
+	q.lockConnLock.Lock()
+	defer q.lockConnLock.Unlock()
+	rows, err = q.lockConn.Query(ctx, `
+	SELECT queue, count(*)
+	FROM acquired_jobs
+	GROUP BY queue
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("failed to send a query with lockConn: %w", err)
+	}
+
+	defer rows.Close()
+
+	for rows.Next() {
+		var queue string
+		var count int
+		if err := rows.Scan(&queue, &count); err != nil {
+			return nil, err
+		}
+
+		if _, exists := stats[queue]; !exists {
+			stats[queue] = &Statistics{}
+		}
+		stats[queue].LockedJobsCount = count
+	}
+
+	if rows.Err() != nil {
+		return nil, fmt.Errorf("failed during reading a lockConn query: %w", rows.Err())
+	}
+
+	return stats, nil
+}
