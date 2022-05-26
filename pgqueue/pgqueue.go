@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"embed"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strconv"
@@ -51,9 +52,10 @@ type JobWithoutId struct {
 }
 
 type Queue struct {
-	lockConn     *pgx.Conn
-	db           *pgxpool.Pool
-	lockConnLock sync.Mutex
+	lockConn      *pgx.Conn
+	db            *pgxpool.Pool
+	lockConnLock  sync.Mutex
+	cleanUpCancel context.CancelFunc
 }
 
 func New(url string) (*Queue, error) {
@@ -80,7 +82,32 @@ func New(url string) (*Queue, error) {
 		return nil, fmt.Errorf("Failed to init lock connection: %w", err)
 	}
 
+	cleanUpCtx, cleanUpCancel := context.WithCancel(context.Background())
+	go func() {
+		if err := q.cleanUp(cleanUpCtx); err != nil {
+			if errors.Is(err, context.Canceled) {
+				return
+			}
+
+			panic(err)
+		}
+	}()
+
+	q.cleanUpCancel = cleanUpCancel
+
 	return &q, nil
+}
+
+func (q *Queue) Close() error {
+	q.cleanUpCancel()
+
+	q.lockConnLock.Lock()
+	defer q.lockConnLock.Unlock()
+	q.lockConn.Close(context.Background())
+
+	q.db.Close()
+
+	return nil
 }
 
 //go:embed init-lock-conn.sql
@@ -501,4 +528,68 @@ func (q *Queue) Statistics(ctx context.Context) (map[string]*Statistics, error) 
 	}
 
 	return stats, nil
+}
+
+//go:embed clean-up.sql
+var cleanUpSql string
+
+func (q *Queue) cleanUp(ctx context.Context) error {
+	for {
+		locked, err := q.cleanUpTryLock(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to lock: %w", err)
+		}
+
+		if locked {
+			break
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Minute * 5):
+		}
+	}
+	defer q.cleanUpUnlock(ctx)
+
+	for {
+		_, err := q.db.Exec(ctx, cleanUpSql)
+		if err != nil {
+			return fmt.Errorf("failed to execute clean up SQL: %w", err)
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Hour):
+		}
+	}
+}
+
+func (q *Queue) cleanUpTryLock(ctx context.Context) (bool, error) {
+	q.lockConnLock.Lock()
+	defer q.lockConnLock.Unlock()
+
+	var locked bool
+	if err := q.lockConn.QueryRow(ctx, `SELECT pg_try_advisory_lock(hashtext('pgqueue_clean_up_lock'))`).Scan(&locked); err != nil {
+		return false, err
+	}
+
+	return locked, nil
+}
+
+func (q *Queue) cleanUpUnlock(ctx context.Context) error {
+	q.lockConnLock.Lock()
+	defer q.lockConnLock.Unlock()
+
+	var unlocked bool
+	if err := q.lockConn.QueryRow(ctx, `SELECT pg_advisory_unlock(hashtext('pgqueue_clean_up_lock'))`).Scan(&unlocked); err != nil {
+		return err
+	}
+
+	if !unlocked {
+		return fmt.Errorf("lock was not owned")
+	}
+
+	return nil
 }
