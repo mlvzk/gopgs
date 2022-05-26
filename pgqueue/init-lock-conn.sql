@@ -32,20 +32,16 @@ END
 $$ LANGUAGE plpgsql;
 
 CREATE FUNCTION pg_temp.unlock_jobs(bigint[]) RETURNS void AS $$
-DECLARE
-    jid bigint;
 BEGIN
     IF (SELECT count(*) FROM acquired_jobs WHERE job_id = ANY($1)) != (SELECT count(*) FROM unnest($1)) THEN
         RAISE EXCEPTION 'You do not have a lock for one of the pgqueue.jobs';
     END IF;
 
-    FOR jid IN SELECT unnest($1)
-    LOOP
-        IF pg_advisory_unlock(jid) THEN
-            DELETE FROM acquired_jobs aj WHERE aj.job_id = jid;
-        ELSE
-            RAISE EXCEPTION 'Failed to unlock job id %', jid;
-        END IF;
-    END LOOP;
+    IF (SELECT sum(pg_try_advisory_xact_lock(jid)::int) FROM unnest($1) AS jid) != (SELECT count(*) FROM unnest($1)) THEN
+        RAISE EXCEPTION 'Failed to convert one of the job session locks to a transaction lock';
+    END IF;
+
+    DELETE FROM acquired_jobs WHERE job_id = ANY($1);
+    PERFORM pg_advisory_unlock(jid) FROM unnest($1) AS jid;
 END
 $$ LANGUAGE plpgsql;
