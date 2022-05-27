@@ -4,12 +4,12 @@ WHERE
 	(
 		(
 			expires_at IS NOT NULL
-			AND expires_at < now() - INTERVAL '1 hour'
+			AND expires_at < now() - INTERVAL '24 hour'
 		)
 		OR
 		(
 			failed_at IS NOT NULL
-			AND failed_at < now() - INTERVAL '1 hour'
+			AND failed_at < now() - INTERVAL '24 hour'
 			AND retryable = false
 		)
 	)
