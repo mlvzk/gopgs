@@ -31,7 +31,6 @@ BEGIN
         IF array_length(acquired_job_ids, 1) > 0 THEN
             SET acquire_jobs.check_lock_count = false;
         END IF;
-        RAISE NOTICE 'will check locks';
 
         expected_lock_count = owned_lock_count + array_length(acquired_job_ids, 1);
 
