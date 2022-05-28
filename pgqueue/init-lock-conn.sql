@@ -1,12 +1,19 @@
 CREATE TEMPORARY TABLE acquired_jobs (job_id bigint not null, queue text not null);
 
+SET acquire_jobs.check_lock_count = true;
+
 CREATE FUNCTION pg_temp.acquire_jobs(text, int) RETURNS SETOF pgqueue.jobs AS $$
 DECLARE
     acquired_job_ids bigint[];
     owned_lock_count int;
     expected_lock_count int;
+    check_lock_count boolean;
 BEGIN
-    SELECT count(*) INTO owned_lock_count FROM pg_locks WHERE locktype = 'advisory' AND pid = pg_backend_pid();
+    check_lock_count = current_setting('acquire_jobs.check_lock_count')::boolean;
+
+    IF check_lock_count THEN
+        SELECT count(*) INTO owned_lock_count FROM pg_locks WHERE locktype = 'advisory' AND pid = pg_backend_pid();
+    END IF;
 
     WITH available_jobs AS (
         SELECT j.id
@@ -20,12 +27,19 @@ BEGIN
         OFFSET 0
     ) SELECT array_agg(j.id) INTO acquired_job_ids FROM (SELECT j.id FROM available_jobs j WHERE pg_try_advisory_xact_lock(j.id) LIMIT $2) j;
 
-    expected_lock_count = owned_lock_count + array_length(acquired_job_ids, 1);
+    IF check_lock_count THEN
+        IF array_length(acquired_job_ids, 1) > 0 THEN
+            SET acquire_jobs.check_lock_count = false;
+        END IF;
+        RAISE NOTICE 'will check locks';
 
-    SELECT count(*) INTO owned_lock_count FROM pg_locks WHERE locktype = 'advisory' AND pid = pg_backend_pid();
+        expected_lock_count = owned_lock_count + array_length(acquired_job_ids, 1);
 
-    IF owned_lock_count != expected_lock_count THEN
-        RAISE EXCEPTION 'Expected % to be the total lock count, but got %', expected_lock_count, owned_lock_count;
+        SELECT count(*) INTO owned_lock_count FROM pg_locks WHERE locktype = 'advisory' AND pid = pg_backend_pid();
+
+        IF owned_lock_count != expected_lock_count THEN
+            RAISE EXCEPTION 'Expected % to be the total lock count, but got %', expected_lock_count, owned_lock_count;
+        END IF;
     END IF;
 
     INSERT INTO acquired_jobs SELECT unnest(acquired_job_ids), $1;
