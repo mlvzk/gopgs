@@ -1,9 +1,21 @@
 CREATE FUNCTION pg_temp.get_or_lock(store_key text, after timestamptz) RETURNS TABLE (kv pgkv.store, found boolean, locked boolean) AS $$
 BEGIN
     RETURN QUERY SELECT s, true AS found, false as locked FROM pgkv.store s WHERE key = store_key AND updated_at > after;
-    IF NOT FOUND THEN
-        RETURN QUERY SELECT null::pgkv.store, false AS found, pg_try_advisory_lock(hashtext('pgkv.get_or_lock ' || store_key)) AS locked;
+    IF FOUND THEN
+        RETURN;
     END IF;
+
+    IF NOT pg_try_advisory_xact_lock(hashtext('pgkv.get_or_lock ' || store_key)) THEN
+        RETURN QUERY SELECT null::pgkv.store, false AS found, false as locked;
+        RETURN;
+    END IF;
+
+    RETURN QUERY SELECT s, true AS found, false as locked FROM pgkv.store s WHERE key = store_key AND updated_at > after;
+    IF FOUND THEN
+        RETURN;
+    END IF;
+
+    RETURN QUERY SELECT null::pgkv.store, false AS found, pg_try_advisory_lock(hashtext('pgkv.get_or_lock ' || store_key)) AS locked;
 END;
 $$ LANGUAGE plpgsql;
 
