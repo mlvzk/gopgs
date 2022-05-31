@@ -221,9 +221,9 @@ func (q *Queue) Enqueue(ctx context.Context, jobs []JobForEnqueue) ([]int64, err
 		with vals as (
 			`+valsSelect+`
 		), dict_to_insert as (
-			select * from (values (0, $`+dictArg+`::bytea)) as t(ref_count, data) where length(data) > 0
+			select * from (values ($`+dictArg+`::bytea)) as t(data) where length(data) > 0
 		), dict_id as (
-			insert into pgqueue.dictionaries (ref_count, data) select * from dict_to_insert returning id
+			insert into pgqueue.dictionaries (data) select * from dict_to_insert returning id
 		), inserted_jobs as (
 			insert into pgqueue.jobs (
 				queue, priority, enqueued_at, run_at, expires_at, failed_at, args, error_count, last_error, retryable, dict_id
@@ -365,7 +365,11 @@ func (q *Queue) Finish(ctx context.Context, jobResults []JobResult) error {
 		ids[i] = res.Id
 	}
 
-	return q.unlock(ctx, ids)
+	if err := q.unlock(ctx, ids); err != nil {
+		return fmt.Errorf("Failed to unlock jobs: %w", err)
+	}
+
+	return nil
 }
 
 func (q *Queue) unlock(ctx context.Context, ids []int64) error {
@@ -611,8 +615,11 @@ func (q *Queue) Statistics(ctx context.Context) (map[string]*Statistics, error) 
 	return stats, nil
 }
 
-//go:embed clean-up.sql
-var cleanUpSql string
+//go:embed clean-up-jobs.sql
+var cleanUpJobsSql string
+
+//go:embed clean-up-dictionaries.sql
+var cleanUpDictionariesSql string
 
 func (q *Queue) cleanUp(ctx context.Context) error {
 	for {
@@ -634,9 +641,12 @@ func (q *Queue) cleanUp(ctx context.Context) error {
 	defer q.cleanUpUnlock(ctx)
 
 	for {
-		_, err := q.db.Exec(ctx, cleanUpSql)
-		if err != nil {
-			return fmt.Errorf("failed to execute clean up SQL: %w", err)
+		if _, err := q.db.Exec(ctx, cleanUpJobsSql); err != nil {
+			return fmt.Errorf("failed to execute clean up jobs SQL: %w", err)
+		}
+
+		if _, err := q.db.Exec(ctx, cleanUpDictionariesSql); err != nil {
+			return fmt.Errorf("failed to execute clean up dictionaries SQL: %w", err)
 		}
 
 		select {
