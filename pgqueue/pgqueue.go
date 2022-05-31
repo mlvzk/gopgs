@@ -24,7 +24,7 @@ import (
 	"github.com/valyala/gozstd"
 )
 
-var tracer = otel.Tracer("github.com/mlvzk/gopgs/pgqueue")
+const pkg = "github.com/mlvzk/gopgs/pgqueue"
 
 type Job struct {
 	JobWithoutId
@@ -172,7 +172,7 @@ type JobForEnqueue struct {
 }
 
 func (q *Queue) Enqueue(ctx context.Context, jobs []JobForEnqueue) ([]int64, error) {
-	ctx, span := tracer.Start(ctx, "Enqueue")
+	ctx, span := otel.Tracer(pkg).Start(ctx, "Enqueue")
 	defer span.End()
 
 	span.SetAttributes(attribute.Int("jobs_length", len(jobs)))
@@ -214,7 +214,7 @@ func (q *Queue) Enqueue(ctx context.Context, jobs []JobForEnqueue) ([]int64, err
 	args = append(args, dictionary)
 	dictArg := strconv.Itoa(len(args))
 
-	ctx, span = tracer.Start(ctx, "Query")
+	ctx, span = otel.Tracer(pkg).Start(ctx, "Query")
 	defer span.End()
 
 	rows, err := q.db.Query(ctx, `
@@ -253,7 +253,7 @@ func (q *Queue) Enqueue(ctx context.Context, jobs []JobForEnqueue) ([]int64, err
 }
 
 func makeDictionary(ctx context.Context, samples [][]byte, maxDictionarySize int) []byte {
-	_, span := tracer.Start(ctx, "makeDictionary")
+	_, span := otel.Tracer(pkg).Start(ctx, "makeDictionary")
 	defer span.End()
 
 	var dictionary []byte
@@ -274,7 +274,7 @@ type jobWithCompressedArgs struct {
 }
 
 func compressJobs(ctx context.Context, jobs []JobForEnqueue, cdict *gozstd.CDict) ([]jobWithCompressedArgs, error) {
-	ctx, span := tracer.Start(ctx, "compressJobs")
+	ctx, span := otel.Tracer(pkg).Start(ctx, "compressJobs")
 	defer span.End()
 
 	jobsWithCompressedArgs := make([]jobWithCompressedArgs, 0, len(jobs))
@@ -328,7 +328,7 @@ type JobResult struct {
 }
 
 func (q *Queue) Finish(ctx context.Context, jobResults []JobResult) error {
-	ctx, span := tracer.Start(ctx, "Finish")
+	ctx, span := otel.Tracer(pkg).Start(ctx, "Finish")
 	defer span.End()
 	span.SetAttributes(attribute.Int("job_results_length", len(jobResults)))
 
@@ -369,7 +369,7 @@ func (q *Queue) Finish(ctx context.Context, jobResults []JobResult) error {
 }
 
 func (q *Queue) unlock(ctx context.Context, ids []int64) error {
-	ctx, span := tracer.Start(ctx, "unlock")
+	ctx, span := otel.Tracer(pkg).Start(ctx, "unlock")
 	defer span.End()
 
 	q.lockConnLock.Lock()
@@ -408,7 +408,7 @@ func Work(ctx context.Context, job *Job, fn func(*Job) error) (jobResult JobResu
 }
 
 func (q *Queue) Get(ctx context.Context, queue string, limit int) ([]Job, error) {
-	ctx, span := tracer.Start(ctx, "Get")
+	ctx, span := otel.Tracer(pkg).Start(ctx, "Get")
 	defer span.End()
 	span.SetAttributes(attribute.String("queue", queue), attribute.Int("limit", limit))
 
@@ -475,7 +475,7 @@ type dictionary struct {
 }
 
 func (q *Queue) getDictionaries(ctx context.Context, dictIds []int64) ([]dictionary, error) {
-	ctx, span := tracer.Start(ctx, "getDictionaries")
+	ctx, span := otel.Tracer(pkg).Start(ctx, "getDictionaries")
 	defer span.End()
 
 	rows, err := q.db.Query(ctx, `
@@ -510,7 +510,7 @@ func (q *Queue) getDictionaries(ctx context.Context, dictIds []int64) ([]diction
 }
 
 func (q *Queue) acquireJobs(ctx context.Context, queue string, limit int) ([]Job, error) {
-	ctx, span := tracer.Start(ctx, "acquireJobs")
+	ctx, span := otel.Tracer(pkg).Start(ctx, "acquireJobs")
 	defer span.End()
 
 	q.lockConnLock.Lock()
