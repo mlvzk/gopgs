@@ -5,12 +5,12 @@ go 1.18
 require (
 	github.com/jackc/pgx/v4 v4.16.1
 	github.com/valyala/gozstd v1.17.0
+	go.opentelemetry.io/otel/trace v1.7.0
 )
 
 require (
 	github.com/go-logr/logr v1.2.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
-	go.opentelemetry.io/otel/trace v1.7.0 // indirect
 )
 
 require (

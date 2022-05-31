@@ -16,6 +16,7 @@ import (
 	"github.com/mlvzk/gopgs/migrate"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 
 	_ "embed"
 
@@ -24,7 +25,9 @@ import (
 	"github.com/valyala/gozstd"
 )
 
-const pkg = "github.com/mlvzk/gopgs/pgqueue"
+func tracer() trace.Tracer {
+	return otel.Tracer("github.com/mlvzk/gopgs/pgqueue")
+}
 
 type Job struct {
 	JobWithoutId
@@ -175,7 +178,7 @@ type JobForEnqueue struct {
 }
 
 func (q *Queue) Enqueue(ctx context.Context, jobs []JobForEnqueue) ([]int64, error) {
-	ctx, span := otel.Tracer(pkg).Start(ctx, "Enqueue")
+	ctx, span := tracer().Start(ctx, "Enqueue")
 	defer span.End()
 
 	span.SetAttributes(attribute.Int("jobs_length", len(jobs)))
@@ -217,7 +220,7 @@ func (q *Queue) Enqueue(ctx context.Context, jobs []JobForEnqueue) ([]int64, err
 	args = append(args, dictionary)
 	dictArg := strconv.Itoa(len(args))
 
-	ctx, span = otel.Tracer(pkg).Start(ctx, "Query")
+	ctx, span = tracer().Start(ctx, "Query")
 	defer span.End()
 
 	rows, err := q.db.Query(ctx, `
@@ -256,7 +259,7 @@ func (q *Queue) Enqueue(ctx context.Context, jobs []JobForEnqueue) ([]int64, err
 }
 
 func makeDictionary(ctx context.Context, samples [][]byte, maxDictionarySize int) []byte {
-	_, span := otel.Tracer(pkg).Start(ctx, "makeDictionary")
+	_, span := tracer().Start(ctx, "makeDictionary")
 	defer span.End()
 
 	var dictionary []byte
@@ -277,7 +280,7 @@ type jobWithCompressedArgs struct {
 }
 
 func compressJobs(ctx context.Context, jobs []JobForEnqueue, cdict *gozstd.CDict) ([]jobWithCompressedArgs, error) {
-	ctx, span := otel.Tracer(pkg).Start(ctx, "compressJobs")
+	ctx, span := tracer().Start(ctx, "compressJobs")
 	defer span.End()
 
 	jobsWithCompressedArgs := make([]jobWithCompressedArgs, 0, len(jobs))
@@ -331,7 +334,7 @@ type JobResult struct {
 }
 
 func (q *Queue) Finish(ctx context.Context, jobResults []JobResult) error {
-	ctx, span := otel.Tracer(pkg).Start(ctx, "Finish")
+	ctx, span := tracer().Start(ctx, "Finish")
 	defer span.End()
 	span.SetAttributes(attribute.Int("job_results_length", len(jobResults)))
 
@@ -376,7 +379,7 @@ func (q *Queue) Finish(ctx context.Context, jobResults []JobResult) error {
 }
 
 func (q *Queue) unlock(ctx context.Context, ids []int64) error {
-	ctx, span := otel.Tracer(pkg).Start(ctx, "unlock")
+	ctx, span := tracer().Start(ctx, "unlock")
 	defer span.End()
 
 	conn, release := q.getLockConn(ctx)
@@ -415,7 +418,7 @@ func Work(ctx context.Context, job *Job, fn func(*Job) error) (jobResult JobResu
 }
 
 func (q *Queue) Get(ctx context.Context, queue string, limit int) ([]Job, error) {
-	ctx, span := otel.Tracer(pkg).Start(ctx, "Get")
+	ctx, span := tracer().Start(ctx, "Get")
 	defer span.End()
 	span.SetAttributes(attribute.String("queue", queue), attribute.Int("limit", limit))
 
@@ -482,7 +485,7 @@ type dictionary struct {
 }
 
 func (q *Queue) getDictionaries(ctx context.Context, dictIds []int64) ([]dictionary, error) {
-	ctx, span := otel.Tracer(pkg).Start(ctx, "getDictionaries")
+	ctx, span := tracer().Start(ctx, "getDictionaries")
 	defer span.End()
 
 	rows, err := q.db.Query(ctx, `
@@ -517,7 +520,7 @@ func (q *Queue) getDictionaries(ctx context.Context, dictIds []int64) ([]diction
 }
 
 func (q *Queue) acquireJobs(ctx context.Context, queue string, limit int) ([]Job, error) {
-	ctx, span := otel.Tracer(pkg).Start(ctx, "acquireJobs")
+	ctx, span := tracer().Start(ctx, "acquireJobs")
 	defer span.End()
 
 	conn, release := q.getLockConn(ctx)
@@ -689,11 +692,11 @@ func (q *Queue) cleanUpUnlock(ctx context.Context) error {
 }
 
 func (q *Queue) getLockConn(ctx context.Context) (lockConn *pgx.Conn, release func()) {
-	_, lockWaitSpan := otel.Tracer(pkg).Start(ctx, "waiting for lockConnLock")
+	_, lockWaitSpan := tracer().Start(ctx, "waiting for lockConnLock")
 	q.lockConnLock.Lock()
 	lockWaitSpan.End()
 
-	_, lockHoldingSpan := otel.Tracer(pkg).Start(ctx, "holding lockConnLock")
+	_, lockHoldingSpan := tracer().Start(ctx, "holding lockConnLock")
 	return q.lockConn, func() {
 		q.lockConnLock.Unlock()
 		lockHoldingSpan.End()
