@@ -102,12 +102,12 @@ func New(url string) (*Queue, error) {
 	return &q, nil
 }
 
-func (q *Queue) Close() error {
+func (q *Queue) Close(ctx context.Context) error {
 	q.cleanUpCancel()
 
-	q.lockConnLock.Lock()
-	defer q.lockConnLock.Unlock()
-	q.lockConn.Close(context.Background())
+	conn, release := q.getLockConn(ctx)
+	defer release()
+	conn.Close(ctx)
 
 	q.db.Close()
 
@@ -118,7 +118,10 @@ func (q *Queue) Close() error {
 var initLockConnSql string
 
 func (q *Queue) initLockConn(ctx context.Context) error {
-	_, err := q.lockConn.Exec(ctx, initLockConnSql)
+	conn, release := q.getLockConn(ctx)
+	defer release()
+
+	_, err := conn.Exec(ctx, initLockConnSql)
 	return err
 }
 
@@ -376,10 +379,10 @@ func (q *Queue) unlock(ctx context.Context, ids []int64) error {
 	ctx, span := otel.Tracer(pkg).Start(ctx, "unlock")
 	defer span.End()
 
-	q.lockConnLock.Lock()
-	defer q.lockConnLock.Unlock()
+	conn, release := q.getLockConn(ctx)
+	defer release()
 
-	_, err := q.lockConn.Exec(ctx, `
+	_, err := conn.Exec(ctx, `
 		select pg_temp.unlock_jobs($1)
 	`, ids)
 	if err != nil {
@@ -517,12 +520,10 @@ func (q *Queue) acquireJobs(ctx context.Context, queue string, limit int) ([]Job
 	ctx, span := otel.Tracer(pkg).Start(ctx, "acquireJobs")
 	defer span.End()
 
-	q.lockConnLock.Lock()
-	defer q.lockConnLock.Unlock()
+	conn, release := q.getLockConn(ctx)
+	defer release()
 
-	var jobs []Job
-
-	rows, err := q.lockConn.Query(ctx, `
+	rows, err := conn.Query(ctx, `
 	SELECT id, queue, priority, enqueued_at, run_at, expires_at, failed_at, args, error_count, last_error, retryable, dict_id FROM pg_temp.acquire_jobs($1, $2)
 	`, queue, limit)
 	if err != nil {
@@ -531,6 +532,7 @@ func (q *Queue) acquireJobs(ctx context.Context, queue string, limit int) ([]Job
 
 	defer rows.Close()
 
+	var jobs []Job
 	for rows.Next() {
 		var job Job
 		err := rows.Scan(&job.Id, &job.Queue, &job.Priority, &job.EnqueuedAt, &job.RunAt, &job.ExpiresAt, &job.FailedAt, &job.compressedArgs, &job.ErrorCount, &job.LastError, &job.Retryable, &job.dictId)
@@ -582,9 +584,10 @@ func (q *Queue) Statistics(ctx context.Context) (map[string]*Statistics, error) 
 		return nil, fmt.Errorf("failed during reading: %w", rows.Err())
 	}
 
-	q.lockConnLock.Lock()
-	defer q.lockConnLock.Unlock()
-	rows, err = q.lockConn.Query(ctx, `
+	conn, release := q.getLockConn(ctx)
+	defer release()
+
+	rows, err = conn.Query(ctx, `
 	SELECT queue, count(*)
 	FROM acquired_jobs
 	GROUP BY queue
@@ -658,11 +661,11 @@ func (q *Queue) cleanUp(ctx context.Context) error {
 }
 
 func (q *Queue) cleanUpTryLock(ctx context.Context) (bool, error) {
-	q.lockConnLock.Lock()
-	defer q.lockConnLock.Unlock()
+	conn, release := q.getLockConn(ctx)
+	defer release()
 
 	var locked bool
-	if err := q.lockConn.QueryRow(ctx, `SELECT pg_try_advisory_lock(hashtext('pgqueue_clean_up_lock'))`).Scan(&locked); err != nil {
+	if err := conn.QueryRow(ctx, `SELECT pg_try_advisory_lock(hashtext('pgqueue_clean_up_lock'))`).Scan(&locked); err != nil {
 		return false, err
 	}
 
@@ -670,11 +673,11 @@ func (q *Queue) cleanUpTryLock(ctx context.Context) (bool, error) {
 }
 
 func (q *Queue) cleanUpUnlock(ctx context.Context) error {
-	q.lockConnLock.Lock()
-	defer q.lockConnLock.Unlock()
+	conn, release := q.getLockConn(ctx)
+	defer release()
 
 	var unlocked bool
-	if err := q.lockConn.QueryRow(ctx, `SELECT pg_advisory_unlock(hashtext('pgqueue_clean_up_lock'))`).Scan(&unlocked); err != nil {
+	if err := conn.QueryRow(ctx, `SELECT pg_advisory_unlock(hashtext('pgqueue_clean_up_lock'))`).Scan(&unlocked); err != nil {
 		return err
 	}
 
@@ -683,4 +686,16 @@ func (q *Queue) cleanUpUnlock(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+func (q *Queue) getLockConn(ctx context.Context) (lockConn *pgx.Conn, release func()) {
+	_, lockWaitSpan := otel.Tracer(pkg).Start(ctx, "waiting for lockConnLock")
+	q.lockConnLock.Lock()
+	lockWaitSpan.End()
+
+	_, lockHoldingSpan := otel.Tracer(pkg).Start(ctx, "holding lockConnLock")
+	return q.lockConn, func() {
+		q.lockConnLock.Unlock()
+		lockHoldingSpan.End()
+	}
 }
