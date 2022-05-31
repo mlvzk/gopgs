@@ -14,6 +14,8 @@ import (
 
 	"github.com/mlvzk/gopgs/internal/helper"
 	"github.com/mlvzk/gopgs/migrate"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 
 	_ "embed"
 
@@ -21,6 +23,8 @@ import (
 	"github.com/jackc/pgx/v4/pgxpool"
 	"github.com/valyala/gozstd"
 )
+
+var tracer = otel.Tracer("github.com/mlvzk/gopgs/pgqueue")
 
 type Job struct {
 	JobWithoutId
@@ -168,19 +172,21 @@ type JobForEnqueue struct {
 }
 
 func (q *Queue) Enqueue(ctx context.Context, jobs []JobForEnqueue) ([]int64, error) {
+	ctx, span := tracer.Start(ctx, "Enqueue")
+	defer span.End()
+
+	span.SetAttributes(attribute.Int("jobs_length", len(jobs)))
+
 	allJobArgs := make([][]byte, len(jobs))
 	allJobArgsLen := 0
 	for i, job := range jobs {
 		allJobArgs[i] = job.Args
 		allJobArgsLen += len(job.Args)
 	}
-	var dictionary []byte
-	if len(jobs) > 1 {
-		dictionary = gozstd.BuildDict(allJobArgs, allJobArgsLen/len(allJobArgs)*2)
-	}
-	if dictionary == nil {
-		dictionary = []byte{}
-	}
+	avgJobArgsLen := allJobArgsLen / len(jobs)
+	span.SetAttributes(attribute.Int("avg_job_args_length", avgJobArgsLen))
+	maxDictionarySize := avgJobArgsLen * 2
+	dictionary := makeDictionary(ctx, allJobArgs, maxDictionarySize)
 
 	var cdict *gozstd.CDict
 	if len(dictionary) > 0 {
@@ -191,23 +197,12 @@ func (q *Queue) Enqueue(ctx context.Context, jobs []JobForEnqueue) ([]int64, err
 		cdict = cd
 	}
 
-	now := time.Now()
-	type jobWithCompressedArgs struct {
-		JobForEnqueue
-		compressedArgs []byte
-	}
-	jobsWithCompressedArgs := make([]jobWithCompressedArgs, 0, len(jobs))
-	for i, job := range jobs {
-		compressedArgs, err := compressZstd(job.Args, cdict)
-		if err != nil {
-			return nil, fmt.Errorf("Failed to compress args of job %d: %w", i, err)
-		}
-		jobsWithCompressedArgs = append(jobsWithCompressedArgs, jobWithCompressedArgs{
-			JobForEnqueue:  job,
-			compressedArgs: compressedArgs,
-		})
+	jobsWithCompressedArgs, err := compressJobs(ctx, jobs, cdict)
+	if err != nil {
+		return nil, fmt.Errorf("Failed to compress jobs: %w", err)
 	}
 
+	now := time.Now()
 	args, valsSelect := helper.GenerateSelect(jobsWithCompressedArgs, func(t *jobWithCompressedArgs, cols *helper.ColumnSetter) {
 		cols.Set("queue", "text", func() any { return t.Queue })
 		cols.Set("priority", "smallint", func() any { return t.Priority })
@@ -218,6 +213,9 @@ func (q *Queue) Enqueue(ctx context.Context, jobs []JobForEnqueue) ([]int64, err
 	})
 	args = append(args, dictionary)
 	dictArg := strconv.Itoa(len(args))
+
+	ctx, span = tracer.Start(ctx, "Query")
+	defer span.End()
 
 	rows, err := q.db.Query(ctx, `
 		with vals as (
@@ -254,6 +252,53 @@ func (q *Queue) Enqueue(ctx context.Context, jobs []JobForEnqueue) ([]int64, err
 	return ids, nil
 }
 
+func makeDictionary(ctx context.Context, samples [][]byte, maxDictionarySize int) []byte {
+	_, span := tracer.Start(ctx, "makeDictionary")
+	defer span.End()
+
+	var dictionary []byte
+	if len(samples) > 1 {
+		dictionary = gozstd.BuildDict(samples, maxDictionarySize)
+		span.SetAttributes(attribute.Int("dictionary_length", len(dictionary)))
+	}
+	if dictionary == nil {
+		dictionary = []byte{}
+	}
+
+	return dictionary
+}
+
+type jobWithCompressedArgs struct {
+	JobForEnqueue
+	compressedArgs []byte
+}
+
+func compressJobs(ctx context.Context, jobs []JobForEnqueue, cdict *gozstd.CDict) ([]jobWithCompressedArgs, error) {
+	ctx, span := tracer.Start(ctx, "compressJobs")
+	defer span.End()
+
+	jobsWithCompressedArgs := make([]jobWithCompressedArgs, 0, len(jobs))
+	for i, job := range jobs {
+		compressedArgs, err := compressZstd(job.Args, cdict)
+		if err != nil {
+			return nil, fmt.Errorf("Failed to compress args of job %d: %w", i, err)
+		}
+		jobsWithCompressedArgs = append(jobsWithCompressedArgs, jobWithCompressedArgs{
+			JobForEnqueue:  job,
+			compressedArgs: compressedArgs,
+		})
+	}
+
+	compressedArgsLen := 0
+	for _, job := range jobsWithCompressedArgs {
+		compressedArgsLen += len(job.compressedArgs)
+	}
+	avgCompressedArgsLen := compressedArgsLen / len(jobsWithCompressedArgs)
+	span.SetAttributes(attribute.Int("avg_compressed_args_length", avgCompressedArgsLen))
+
+	return jobsWithCompressedArgs, nil
+}
+
 func compressZstd(data []byte, cdict *gozstd.CDict) ([]byte, error) {
 	out := bytes.NewBuffer([]byte{})
 	writer := gozstd.NewWriterParams(out, &gozstd.WriterParams{
@@ -283,9 +328,9 @@ type JobResult struct {
 }
 
 func (q *Queue) Finish(ctx context.Context, jobResults []JobResult) error {
-	if len(jobResults) == 0 {
-		return nil
-	}
+	ctx, span := tracer.Start(ctx, "Finish")
+	defer span.End()
+	span.SetAttributes(attribute.Int("job_results_length", len(jobResults)))
 
 	args, resultsSelect := helper.GenerateSelect(jobResults, func(t *JobResult, cols *helper.ColumnSetter) {
 		cols.Set("id", "bigint", func() any { return t.Id })
@@ -324,9 +369,8 @@ func (q *Queue) Finish(ctx context.Context, jobResults []JobResult) error {
 }
 
 func (q *Queue) unlock(ctx context.Context, ids []int64) error {
-	if len(ids) == 0 {
-		return nil
-	}
+	ctx, span := tracer.Start(ctx, "unlock")
+	defer span.End()
 
 	q.lockConnLock.Lock()
 	defer q.lockConnLock.Unlock()
@@ -364,6 +408,111 @@ func Work(ctx context.Context, job *Job, fn func(*Job) error) (jobResult JobResu
 }
 
 func (q *Queue) Get(ctx context.Context, queue string, limit int) ([]Job, error) {
+	ctx, span := tracer.Start(ctx, "Get")
+	defer span.End()
+	span.SetAttributes(attribute.String("queue", queue), attribute.Int("limit", limit))
+
+	jobs, err := q.acquireJobs(ctx, queue, limit)
+	if err != nil {
+		return nil, fmt.Errorf("Failed to acquire jobs: %w", err)
+	}
+
+	uniqDictIds := make(map[int64]struct{}, 0)
+	for i := range jobs {
+		if jobs[i].dictId != nil {
+			uniqDictIds[*jobs[i].dictId] = struct{}{}
+		}
+	}
+	dictIds := make([]int64, 0, len(uniqDictIds))
+	for id := range uniqDictIds {
+		dictIds = append(dictIds, id)
+	}
+
+	dictionaries, err := q.getDictionaries(ctx, dictIds)
+	if err != nil {
+		return nil, fmt.Errorf("Failed to get dictionaries: %w", err)
+	}
+
+	dictIdToDDict := make(map[int64]*gozstd.DDict, len(dictionaries))
+	for _, dict := range dictionaries {
+		ddict, err := gozstd.NewDDict(dict.data)
+		if err != nil {
+			return nil, fmt.Errorf("Failed to create DDict: %w", err)
+		}
+		dictIdToDDict[dict.id] = ddict
+	}
+
+	for i := range jobs {
+		job := &jobs[i]
+		if job.dictId != nil {
+			ddict := dictIdToDDict[*job.dictId]
+			job.decompressArgs = func() []byte {
+				args, err := gozstd.DecompressDict([]byte{}, job.compressedArgs, ddict)
+				if err != nil {
+					panic(fmt.Errorf("Failed to decompress args with dictionary for job %d: %w", job.Id, err))
+				}
+
+				return args
+			}
+		} else {
+			job.decompressArgs = func() []byte {
+				args, err := gozstd.Decompress([]byte{}, job.compressedArgs)
+				if err != nil {
+					panic(fmt.Errorf("Failed to decompress args for job %d: %w", job.Id, err))
+				}
+
+				return args
+			}
+		}
+	}
+
+	return jobs, nil
+}
+
+type dictionary struct {
+	id   int64
+	data []byte
+}
+
+func (q *Queue) getDictionaries(ctx context.Context, dictIds []int64) ([]dictionary, error) {
+	ctx, span := tracer.Start(ctx, "getDictionaries")
+	defer span.End()
+
+	rows, err := q.db.Query(ctx, `
+		select id, data from pgqueue.dictionaries where id = ANY($1)
+	`, dictIds)
+	if err != nil {
+		return nil, err
+	}
+
+	defer rows.Close()
+
+	dicts := make([]dictionary, 0)
+	for rows.Next() {
+		var id int64
+		var data []byte
+
+		if err := rows.Scan(&id, &data); err != nil {
+			return nil, err
+		}
+
+		dicts = append(dicts, dictionary{
+			id:   id,
+			data: data,
+		})
+	}
+
+	if rows.Err() != nil {
+		return nil, err
+	}
+
+	return dicts, nil
+}
+
+func (q *Queue) acquireJobs(ctx context.Context, queue string, limit int) ([]Job, error) {
+	ctx, span := tracer.Start(ctx, "acquireJobs")
+	defer span.End()
+
 	q.lockConnLock.Lock()
 	defer q.lockConnLock.Unlock()
 
@@ -378,7 +527,6 @@ func (q *Queue) Get(ctx context.Context, queue string, limit int) ([]Job, error)
 
 	defer rows.Close()
 
-	uniqDictIds := make(map[int64]struct{}, 0)
 	for rows.Next() {
 		var job Job
 		err := rows.Scan(&job.Id, &job.Queue, &job.Priority, &job.EnqueuedAt, &job.RunAt, &job.ExpiresAt, &job.FailedAt, &job.compressedArgs, &job.ErrorCount, &job.LastError, &job.Retryable, &job.dictId)
@@ -387,78 +535,11 @@ func (q *Queue) Get(ctx context.Context, queue string, limit int) ([]Job, error)
 		}
 
 		jobs = append(jobs, job)
-		if job.dictId != nil {
-			uniqDictIds[*job.dictId] = struct{}{}
-		}
 	}
 
 	if rows.Err() != nil {
 		return nil, rows.Err()
 	}
-
-	dictIds := make([]int64, 0, len(uniqDictIds))
-	for id := range uniqDictIds {
-		dictIds = append(dictIds, id)
-	}
-
-	rows, err = q.db.Query(ctx, `
-		select id, data from pgqueue.dictionaries where id = ANY($1)
-	`, dictIds)
-	if err != nil {
-		return nil, err
-	}
-
-	defer rows.Close()
-
-	dictIdToDecomp := make(map[int64]func([]byte) ([]byte, error))
-	for rows.Next() {
-		var id int64
-		var data []byte
-
-		if err := rows.Scan(&id, &data); err != nil {
-			return nil, err
-		}
-
-		ddict, err := gozstd.NewDDict(data)
-		if err != nil {
-			return nil, err
-		}
-
-		decompress := func(data []byte) ([]byte, error) {
-			return gozstd.DecompressDict([]byte{}, data, ddict)
-		}
-
-		dictIdToDecomp[id] = decompress
-	}
-
-	for i := range jobs {
-		job := &jobs[i]
-		if job.dictId != nil {
-			decompress := dictIdToDecomp[*job.dictId]
-			job.decompressArgs = func() []byte {
-				args, err := decompress(job.compressedArgs)
-				if err != nil {
-					panic(err)
-				}
-
-				return args
-			}
-		} else {
-			job.decompressArgs = func() []byte {
-				args, err := gozstd.Decompress([]byte{}, job.compressedArgs)
-				if err != nil {
-					panic(err)
-				}
-
-				return args
-			}
-		}
-	}
-
-	if rows.Err() != nil {
-		return nil, err
-	}
-
 	return jobs, nil
 }
 
