@@ -6,6 +6,7 @@ import (
 	"embed"
 	"errors"
 	"fmt"
+	"io"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -284,8 +285,10 @@ func compressJobs(ctx context.Context, jobs []JobForEnqueue, cdict *gozstd.CDict
 	defer span.End()
 
 	jobsWithCompressedArgs := make([]jobWithCompressedArgs, 0, len(jobs))
+	zstdWriter := gozstd.NewWriter(io.Discard)
+	defer zstdWriter.Release()
 	for i, job := range jobs {
-		compressedArgs, err := compressZstd(job.Args, cdict)
+		compressedArgs, err := compressZstd(job.Args, zstdWriter, cdict)
 		if err != nil {
 			return nil, fmt.Errorf("Failed to compress args of job %d: %w", i, err)
 		}
@@ -305,15 +308,16 @@ func compressJobs(ctx context.Context, jobs []JobForEnqueue, cdict *gozstd.CDict
 	return jobsWithCompressedArgs, nil
 }
 
-func compressZstd(data []byte, cdict *gozstd.CDict) ([]byte, error) {
+func compressZstd(data []byte, writer *gozstd.Writer, cdict *gozstd.CDict) ([]byte, error) {
 	out := bytes.NewBuffer([]byte{})
-	writer := gozstd.NewWriterParams(out, &gozstd.WriterParams{
+
+	writer.ResetWriterParams(out, &gozstd.WriterParams{
 		Dict:             cdict,
 		CompressionLevel: 11,
 		WindowLog:        27,
 	})
 
-	defer writer.Release()
+	defer writer.Close()
 
 	_, err := writer.Write(data)
 	if err != nil {
