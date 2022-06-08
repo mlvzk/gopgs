@@ -205,7 +205,15 @@ func (q *Queue) Enqueue(ctx context.Context, jobs []JobForEnqueue) ([]int64, err
 	avgJobArgsLen := allJobArgsLen / len(jobs)
 	span.SetAttributes(attribute.Int("avg_job_args_length", avgJobArgsLen))
 	maxDictionarySize := avgJobArgsLen * 2
-	dictionary := makeDictionary(ctx, allJobArgs, maxDictionarySize)
+
+	samples := make([][]byte, 0)
+	for i := 0; i < len(allJobArgs); i += 10 {
+		samples = append(samples, allJobArgs[i])
+	}
+	if len(allJobArgs) < 100 {
+		samples = allJobArgs
+	}
+	dictionary := makeDictionary(ctx, samples, maxDictionarySize)
 
 	var cdict *gozstd.CDict
 	if len(dictionary) > 0 {
