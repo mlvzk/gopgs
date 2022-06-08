@@ -192,6 +192,10 @@ func (q *Queue) Enqueue(ctx context.Context, jobs []JobForEnqueue) ([]int64, err
 
 	span.SetAttributes(attribute.Int("jobs_length", len(jobs)))
 
+	if len(jobs) == 0 {
+		return nil, nil
+	}
+
 	allJobArgs := make([][]byte, len(jobs))
 	allJobArgsLen := 0
 	for i, job := range jobs {
