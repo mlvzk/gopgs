@@ -217,7 +217,7 @@ func (q *Queue) Enqueue(ctx context.Context, jobs []JobForEnqueue) ([]int64, err
 
 	var cdict *gozstd.CDict
 	if len(dictionary) > 0 {
-		cd, err := gozstd.NewCDictLevel(dictionary, 11)
+		cd, err := gozstd.NewCDictLevel(dictionary, 6)
 		if err != nil {
 			return nil, fmt.Errorf("Failed to create a zstd cdict: %w", err)
 		}
@@ -333,7 +333,7 @@ func compressZstd(data []byte, writer *gozstd.Writer, cdict *gozstd.CDict) ([]by
 
 	writer.ResetWriterParams(out, &gozstd.WriterParams{
 		Dict:             cdict,
-		CompressionLevel: 11,
+		CompressionLevel: 6,
 		WindowLog:        27,
 	})
 
