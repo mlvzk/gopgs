@@ -47,6 +47,10 @@ func (job *Job) Args() []byte {
 	return job.decompressedArgs
 }
 
+func (job *Job) ArgsNoCache() []byte {
+	return job.decompressArgs()
+}
+
 type JobWithoutId struct {
 	Queue      string
 	Priority   int
@@ -60,10 +64,11 @@ type JobWithoutId struct {
 }
 
 type Queue struct {
-	lockConn      *pgx.Conn
-	db            *pgxpool.Pool
-	lockConnLock  sync.Mutex
-	cleanUpCancel context.CancelFunc
+	lockConn        *pgx.Conn
+	db              *pgxpool.Pool
+	lockConnLock    sync.Mutex
+	cleanUpCancel   context.CancelFunc
+	cleanUpFinished chan struct{}
 }
 
 func New(url string) (*Queue, error) {
@@ -93,6 +98,7 @@ func New(url string) (*Queue, error) {
 	cleanUpCtx, cleanUpCancel := context.WithCancel(context.Background())
 	go func() {
 		if err := q.cleanUp(cleanUpCtx); err != nil {
+			close(q.cleanUpFinished)
 			if errors.Is(err, context.Canceled) {
 				return
 			}
@@ -102,12 +108,14 @@ func New(url string) (*Queue, error) {
 	}()
 
 	q.cleanUpCancel = cleanUpCancel
+	q.cleanUpFinished = make(chan struct{})
 
 	return &q, nil
 }
 
 func (q *Queue) Close(ctx context.Context) error {
 	q.cleanUpCancel()
+	<-q.cleanUpFinished
 
 	conn, release := q.getLockConn(ctx)
 	defer release()
