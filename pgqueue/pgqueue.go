@@ -273,7 +273,7 @@ func (q *Queue) Enqueue(ctx context.Context, jobs []JobForEnqueue) ([]int64, err
 	}
 
 	if rows.Err() != nil {
-		return nil, fmt.Errorf("rows.Err(): %w", err)
+		return nil, fmt.Errorf("rows.Err(): %w", rows.Err())
 	}
 
 	return ids, nil
