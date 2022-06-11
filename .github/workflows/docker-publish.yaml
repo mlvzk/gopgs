@@ -1,0 +1,23 @@
+name: Docker Publish
+
+on:
+  push:
+    branches:
+      - master
+
+jobs:
+  build-publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v2
+      - name: Log into registry
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+      - name: Build
+        run: docker build -t ghcr.io/mlvzk/gopgs-exporter:${GITHUB_SHA::6} -t ghcr.io/mlvzk/gopgs-exporter:latest .
+      - name: Publish
+        run: |
+          docker push ghcr.io/mlvzk/gopgs-exporter:${GITHUB_SHA::6}
+          docker push ghcr.io/mlvzk/gopgs-exporter:latest
