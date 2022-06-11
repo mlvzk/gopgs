@@ -71,7 +71,7 @@ func main() {
 		}
 	}()
 
-	log.Println("Starting server on :8080")
+	log.Println("Starting server on :7688")
 	http.Handle("/metrics", promhttp.Handler())
 	http.ListenAndServe(":7688", nil)
 }
