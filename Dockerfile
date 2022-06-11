@@ -1,4 +1,4 @@
-FROM golang:1.18
+FROM golang:1.18 AS BUILDER
 
 WORKDIR /usr/src/app
 
@@ -8,4 +8,8 @@ RUN go mod download
 COPY . .
 RUN cd ./cmd/exporter && go build .
 
-CMD ["./cmd/exporter/exporter"]
+FROM debian:bullseye
+
+COPY --from=BUILDER /usr/src/app/cmd/exporter/exporter .
+
+CMD ["./exporter"]
