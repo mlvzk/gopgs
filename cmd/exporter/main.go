@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"log"
 	"net/http"
 	"os"
 	"time"
@@ -70,6 +71,7 @@ func main() {
 		}
 	}()
 
+	log.Println("Starting server on :8080")
 	http.Handle("/metrics", promhttp.Handler())
 	http.ListenAndServe(":7688", nil)
 }
