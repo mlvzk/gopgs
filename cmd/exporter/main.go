@@ -34,6 +34,8 @@ func main() {
 	prometheus.MustRegister(jobsGauge)
 
 	go func() {
+		queues := map[string]struct{}{}
+
 		for {
 			rows, err := db.Query(ctx, `
 			SELECT queue, count(*)
@@ -47,6 +49,7 @@ func main() {
 				panic(err)
 			}
 
+			queueToCount := map[string]int{}
 			for rows.Next() {
 				var queue string
 				var count int
@@ -54,7 +57,7 @@ func main() {
 					panic(err)
 				}
 
-				jobsGauge.WithLabelValues(queue).Set(float64(count))
+				queueToCount[queue] = count
 			}
 
 			if err := rows.Err(); err != nil {
@@ -62,6 +65,17 @@ func main() {
 			}
 
 			rows.Close()
+
+			for queue := range queues {
+				if _, ok := queueToCount[queue]; !ok {
+					queueToCount[queue] = 0
+				}
+			}
+
+			for queue, count := range queueToCount {
+				queues[queue] = struct{}{}
+				jobsGauge.WithLabelValues(queue).Set(float64(count))
+			}
 
 			select {
 			case <-ctx.Done():
