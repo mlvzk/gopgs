@@ -3,3 +3,6 @@ tasks:
     command: docker-compose up
     env:
       PGQUEUE_URL: "postgres://postgres:postgres@localhost/postgres"
+vscode:
+  extensions:
+    - golang.go
