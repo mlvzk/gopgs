@@ -32,30 +32,28 @@ func New(ctx context.Context, connStr string) (*Store, error) {
 		return nil, fmt.Errorf("failed to parse connStr: %w", err)
 	}
 
-	migrateOnce := sync.Once{}
-	config.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
-		migrateOnce.Do(func() {
-			if err := runMigrations(ctx, conn); err != nil {
-				panic(err)
-			}
-		})
-
-		_, err := conn.Exec(ctx, initConnSql)
-		if err != nil {
-			return fmt.Errorf("failed to run initConnSql: %w", err)
-		}
-
-		return nil
-	}
-
 	db, err := pgxpool.ConnectConfig(ctx, config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to db: %w", err)
 	}
 
+	if err := db.AcquireFunc(ctx, func(c *pgxpool.Conn) error {
+		if err := runMigrations(ctx, c.Conn()); err != nil {
+			return fmt.Errorf("failed to run migrations: %w", err)
+		}
+
+		return nil
+	}); err != nil {
+		return nil, fmt.Errorf("failed to acquire connection or run migrations: %w", err)
+	}
+
 	lockConn, err := db.Acquire(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to acquire lock connection: %w", err)
+	}
+
+	if _, err := lockConn.Exec(ctx, initConnSql); err != nil {
+		return nil, fmt.Errorf("failed to run initConnSql: %w", err)
 	}
 
 	listenConn, err := db.Acquire(ctx)
